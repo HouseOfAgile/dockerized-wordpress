@@ -1,0 +1,118 @@
+services:
+  wordpress:
+    build:
+      context: .
+      dockerfile: wordpress.Dockerfile
+      args:
+        WP_VERSION: ${WP_VERSION}
+        PHP_VERSION: ${PHP_VERSION}
+    restart: ${RESTART_POLICY:-always}
+    environment:
+      - WORDPRESS_DB_HOST=${MYSQL_IP}
+      - WORDPRESS_DB_USER=${WORDPRESS_DB_USER}
+      - WORDPRESS_DB_PASSWORD=${WORDPRESS_DB_PASSWORD}
+      - WORDPRESS_DB_NAME=${WORDPRESS_DB_NAME}
+      - WP_LANG=${WP_LANG:-en_US}
+      - WP_HOST=${APP_MAIN_DOMAIN}
+      - WORDPRESS_CONFIG_EXTRA=define('WP_CONTENT_DIR', '/app/${PROJECT_NAME}/wp-content'); define('WP_HOME', 'http://${APP_MAIN_DOMAIN}:${APP_PORT}'); define('WP_SITEURL', 'http://${APP_MAIN_DOMAIN}:${APP_PORT}');
+    volumes:
+      - wp_data:/var/www/html
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["php-fpm"]
+    networks:
+      hoa_network:
+        ipv4_address: ${WORDPRESS_IP}
+    labels:
+      - docker-volume-backup.stop-during-backup=true
+
+  nginx:
+    image: nginx:alpine
+    restart: ${RESTART_POLICY:-always}
+    ports:
+      - "${APP_PORT}:80"
+    environment:
+      - APP_MAIN_DOMAIN=${APP_MAIN_DOMAIN}
+      - PROJECT_NAME=${PROJECT_NAME}
+    volumes:
+      - wp_data:/var/www/html
+      - ./nginx.conf.template:/etc/nginx/conf.d/default.conf.template
+      - ./restrictions.conf:/etc/nginx/restrictions.conf
+      - ./entrypoint.sh:/docker-entrypoint.d/entrypoint.sh
+    entrypoint: ["/bin/sh", "-c", "/docker-entrypoint.d/entrypoint.sh && exec nginx -g 'daemon off;'"]
+    depends_on:
+      - wordpress
+    networks:
+      hoa_network:
+        ipv4_address: ${NGINX_IP}
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.${PROJECT_NAME}.rule=Host(`${APP_MAIN_DOMAIN}`)
+      - traefik.http.routers.${PROJECT_NAME}.tls.certresolver=default
+      - traefik.http.services.${PROJECT_NAME}.loadbalancer.server.port=80
+
+  db:
+    image: mysql:5.7
+    restart: ${RESTART_POLICY:-always}
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_DATABASE=${WORDPRESS_DB_NAME}
+      - MYSQL_USER=${WORDPRESS_DB_USER}
+      - MYSQL_PASSWORD=${WORDPRESS_DB_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./mysql-dump.sh:/mysql-dump.sh:ro
+      - ./backups:/backup
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      hoa_network:
+        ipv4_address: ${MYSQL_IP}
+    labels:
+      - docker-volume-backup.stop-during-backup=false
+      - docker-volume-backup.archive-post=/bin/sh /mysql-dump.sh
+  backup:
+    image: offen/docker-volume-backup
+    depends_on:
+      - wordpress
+      - db
+    volumes:
+      - wp_data:/backup/html:ro
+      - db_data:/backup/db:ro
+      - ./backups:/archive
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - BACKUP_CRON_EXPRESSION=${BACKUP_CRON_EXPRESSION:-'0 0 * * 0'}
+      - BACKUP_FILENAME=backup-%Y-%m-%dT%H-%M-%S.tar.gz
+      - BACKUP_RETENTION_DAYS=7
+    networks:
+      hoa_network:
+
+networks:
+  hoa_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${SUBNET}
+
+volumes:
+  db_data:
+    name: ${COMPOSE_PROJECT_NAME}_db_data
+  wp_data:
+    name: ${COMPOSE_PROJECT_NAME}_wp_data
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /srv/volumes/${PROJECT_NAME}/current
+  backups:
+    name: ${COMPOSE_PROJECT_NAME}_backups
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./backups
