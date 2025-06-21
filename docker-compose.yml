@@ -8,7 +8,7 @@ services:
         PHP_VERSION: ${PHP_VERSION}
     restart: ${RESTART_POLICY:-always}
     environment:
-      - WORDPRESS_DB_HOST=${MYSQL_IP}
+      - WORDPRESS_DB_HOST=db
       - WORDPRESS_DB_USER=${WORDPRESS_DB_USER}
       - WORDPRESS_DB_PASSWORD=${WORDPRESS_DB_PASSWORD}
       - WORDPRESS_DB_NAME=${WORDPRESS_DB_NAME}
@@ -22,8 +22,7 @@ services:
         condition: service_healthy
     command: ["php-fpm"]
     networks:
-      hoa_network:
-        ipv4_address: ${WORDPRESS_IP}
+      default:
     labels:
       - docker-volume-backup.stop-during-backup=true
 
@@ -44,11 +43,12 @@ services:
     depends_on:
       - wordpress
     networks:
-      hoa_network:
-        ipv4_address: ${NGINX_IP}
+      - default
+      - traefik_network
+
     labels:
       - traefik.enable=true
-      - traefik.http.routers.${PROJECT_NAME}.rule=Host(`${APP_MAIN_DOMAIN}`)
+      - traefik.http.routers.${PROJECT_NAME}.rule=Host(`${APP_TRAEFIK_DOMAINS}`)
       - traefik.http.routers.${PROJECT_NAME}.tls.certresolver=default
       - traefik.http.services.${PROJECT_NAME}.loadbalancer.server.port=80
 
@@ -70,8 +70,7 @@ services:
       timeout: 5s
       retries: 10
     networks:
-      hoa_network:
-        ipv4_address: ${MYSQL_IP}
+      default:
     labels:
       - docker-volume-backup.stop-during-backup=false
       - docker-volume-backup.archive-post=/bin/sh /mysql-dump.sh
@@ -90,14 +89,13 @@ services:
       - BACKUP_FILENAME=backup-%Y-%m-%dT%H-%M-%S.tar.gz
       - BACKUP_RETENTION_DAYS=7
     networks:
-      hoa_network:
+      default:
 
 networks:
-  hoa_network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: ${SUBNET}
+  default:    # your stack’s private network, auto-created by Compose
+  traefik_network:
+    name: ${TRAEFIK_NETWORK}
+    external: true
 
 volumes:
   db_data:
